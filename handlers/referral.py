@@ -4,6 +4,7 @@ from aiogram.fsm.context import FSMContext
 import database as db
 import keyboards as kb
 from config import ADMIN_ID, REFERRAL_TIERS
+from handlers.user import notify_referrer
 
 router = Router(name="referral")
 
@@ -43,9 +44,18 @@ async def cb_referral_info(callback: types.CallbackQuery):
     else:
         lines.append("🎉 Ты достиг максимального уровня скидки!")
 
+    existing = [c for c, d in db.list_discount_codes().items() if d["user_id"] == str(user_id)]
+    if existing:
+        code = existing[0]
+        percent = db.list_discount_codes()[code]["tier_percent"]
+        lines.append(f"\n🎁 Твой код скидки *{percent}%*:\n`{code}`\nПришли его нам в личные сообщения для применения.")
+
     lines.append(
         "\n_Друг засчитывается только после того, как подпишется на канал — "
-        "просто перехода по ссылке недостаточно._"
+        "просто перехода по ссылке недостаточно._\n\n"
+        "_Скидка действует на весь заказ целиком: можно заказать одно сведение "
+        "или сразу несколько треков — скидка применится один раз ко всей сумме. "
+        "После использования код сгорает, и счёт друзей начинается заново._"
     )
 
     await callback.message.edit_text(
@@ -98,6 +108,13 @@ async def cb_referral_adjust_menu(callback: types.CallbackQuery):
     uid = callback.data.replace("refadj_", "")
     count = db.get_referral_count(int(uid))
 
+    code_line = ""
+    existing = [c for c, d in db.list_discount_codes().items() if d["user_id"] == uid]
+    if existing:
+        code = existing[0]
+        percent = db.list_discount_codes()[code]["tier_percent"]
+        code_line = f"\n🎁 Действующий код: `{code}` ({percent}%)"
+
     kb_adjust = types.InlineKeyboardMarkup(inline_keyboard=[
         [
             types.InlineKeyboardButton(text="➖ 1", callback_data=f"refdelta_{uid}_-1"),
@@ -111,8 +128,8 @@ async def cb_referral_adjust_menu(callback: types.CallbackQuery):
     ])
 
     await callback.message.edit_text(
-        f"👤 Пользователь ID `{uid}`\nТекущее число рефералов: *{count}*\n\n"
-        f"Выбери изменение:",
+        f"👤 Пользователь ID `{uid}`\nТекущее число рефералов: *{count}*"
+        f"{code_line}\n\nВыбери изменение:",
         parse_mode="Markdown",
         reply_markup=kb_adjust
     )
@@ -129,8 +146,33 @@ async def cb_referral_apply_delta(callback: types.CallbackQuery):
     uid = parts[1]
     delta = int(parts[2])
 
-    new_count = db.adjust_referral_count(int(uid), delta)
-    await callback.answer(f"✅ Новое количество: {new_count}", show_alert=True)
+    result = db.adjust_referral_count(int(uid), delta)
+
+    if result is None:
+        await callback.answer("❌ Пользователь не найден.", show_alert=True)
+        return
+
+    # уведомляем самого пользователя — точно так же, как при обычном реферале,
+    # чтобы для него ручная корректировка и реальный реферал выглядели одинаково
+    await notify_referrer(callback.bot, result)
+
+    if result["tier_changed"] and result["code"]:
+        await callback.answer(
+            f"✅ Новое количество: {result['referral_count']}. "
+            f"Выдан новый код {result['code']} ({result['tier_percent']}%).",
+            show_alert=True
+        )
+    else:
+        await callback.answer(f"✅ Новое количество: {result['referral_count']}", show_alert=True)
+
+    code_line = ""
+    if result["code"]:
+        code_line = f"\n🎁 Выдан код: `{result['code']}` ({result['tier_percent']}%)"
+    elif result["tier_percent"]:
+        # уровень не сменился сейчас, но у пользователя уже есть активный код с прошлого раза
+        existing = [c for c, d in db.list_discount_codes().items() if d["user_id"] == uid]
+        if existing:
+            code_line = f"\n🎁 Действующий код: `{existing[0]}` ({result['tier_percent']}%)"
 
     kb_adjust = types.InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -144,8 +186,8 @@ async def cb_referral_apply_delta(callback: types.CallbackQuery):
         [types.InlineKeyboardButton(text="◀️ К списку", callback_data="admin_referrals")],
     ])
     await callback.message.edit_text(
-        f"👤 Пользователь ID `{uid}`\nТекущее число рефералов: *{new_count}*\n\n"
-        f"Выбери изменение:",
+        f"👤 Пользователь ID `{uid}`\nТекущее число рефералов: *{result['referral_count']}*"
+        f"{code_line}\n\nВыбери изменение:",
         parse_mode="Markdown",
         reply_markup=kb_adjust
     )
@@ -219,8 +261,20 @@ async def cb_delete_discount(callback: types.CallbackQuery):
         return
 
     code = callback.data.replace("deldisc_", "")
-    if db.delete_discount_code(code):
-        await callback.answer(f"✅ Код {code} удалён.", show_alert=True)
+    deleted = db.delete_discount_code(code)
+    if deleted:
+        await callback.answer(f"✅ Код {code} удалён. Прогресс пользователя сброшен.", show_alert=True)
+        try:
+            await callback.bot.send_message(
+                int(deleted["user_id"]),
+                "✅ *Скидка применена к заказу!*\n\n"
+                "Спасибо, что воспользовался реферальной программой. "
+                "Счёт приглашённых друзей начинается заново — "
+                "приглашай новых друзей и получай скидку снова! 🤝",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
     else:
         await callback.answer("❌ Код уже не существует.", show_alert=True)
 

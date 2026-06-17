@@ -55,7 +55,7 @@ async def cb_check_sub(callback: types.CallbackQuery):
         # реферал засчитывается рефереру только сейчас, а не при простом /start.
         result = db.confirm_referral(callback.from_user.id)
         if result:
-            await _notify_referrer_new_tier(callback.bot, result)
+            await notify_referrer(callback.bot, result)
 
         await callback.message.edit_text(
             "✅ Подписка подтверждена!\n\nДобро пожаловать. Выбери действие:",
@@ -68,18 +68,31 @@ async def cb_check_sub(callback: types.CallbackQuery):
         )
 
 
-async def _notify_referrer_new_tier(bot, result: dict):
-    """Уведомляет реферера о новом уровне скидки и новом коде."""
+async def notify_referrer(bot, result: dict):
+    """
+    Уведомляет реферера о приросте счёта рефералов — всегда, при каждом изменении,
+    чтобы человек видел, что система реально работает, без необходимости заходить
+    и проверять вручную. Если это привело к новому уровню скидки — добавляется код.
+    """
     try:
-        await bot.send_message(
-            result["referrer_id"],
-            f"🎉 *Поздравляем!*\n\n"
-            f"У тебя теперь *{result['referral_count']}* подтверждённых друзей по реферальной программе.\n"
-            f"Ты получаешь скидку *{result['new_tier_percent']}%*!\n\n"
-            f"Твой код скидки:\n`{result['code']}`\n\n"
-            f"Пришли этот код нам в личные сообщения, чтобы получить скидку.",
-            parse_mode="Markdown"
-        )
+        if result["tier_changed"] and result["code"]:
+            text = (
+                f"🎉 *Поздравляем!*\n\n"
+                f"У тебя теперь *{result['referral_count']}* подтверждённых друзей.\n"
+                f"Ты получаешь скидку *{result['tier_percent']}%*!\n\n"
+                f"Твой код скидки:\n`{result['code']}`\n\n"
+                f"Пришли этот код нам в личные сообщения, чтобы получить скидку.\n\n"
+                f"_Скидка действует на один заказ целиком — можно сделать одно сведение "
+                f"или сразу несколько треков, скидка применится один раз. "
+                f"После использования кода счёт рефералов начнётся заново._"
+            )
+        else:
+            text = (
+                f"🤝 *У тебя новый реферал!*\n\n"
+                f"Друг подписался на канал. Сейчас у тебя *{result['referral_count']}* "
+                f"подтверждённых друзей."
+            )
+        await bot.send_message(result["referrer_id"], text, parse_mode="Markdown")
     except Exception as e:
         logging.warning(f"Не удалось отправить уведомление о реферальном бонусе: {e}")
 

@@ -180,4 +180,3 @@ async def _send_broadcast_to_user(bot, user_id: int, messages: list[dict]):
             await bot.send_voice(user_id, item["file_id"])
         elif t == "sticker":
             await bot.send_sticker(user_id, item["file_id"])
-        
