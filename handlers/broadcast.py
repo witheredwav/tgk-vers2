@@ -71,20 +71,30 @@ async def collect_broadcast_message(message: types.Message, state: FSMContext):
 
 
 def _serialize_message(message: types.Message) -> dict | None:
-    if message.text:
-        return {"type": "text", "text": message.text}
+    # Порядок проверок важен: медиа-сообщение может содержать caption,
+    # но не message.text, поэтому сначала проверяем специфичные типы.
     if message.photo:
         return {"type": "photo", "file_id": message.photo[-1].file_id, "caption": message.caption or ""}
     if message.video:
         return {"type": "video", "file_id": message.video.file_id, "caption": message.caption or ""}
+    if message.animation:
+        return {"type": "animation", "file_id": message.animation.file_id, "caption": message.caption or ""}
     if message.document:
         return {"type": "document", "file_id": message.document.file_id, "caption": message.caption or ""}
+    if message.audio:
+        return {"type": "audio", "file_id": message.audio.file_id, "caption": message.caption or ""}
+    if message.voice:
+        return {"type": "voice", "file_id": message.voice.file_id}
+    if message.sticker:
+        return {"type": "sticker", "file_id": message.sticker.file_id}
+    if message.text:
+        return {"type": "text", "text": message.text}
     return None
 
 
 # ─── ПОДТВЕРЖДЕНИЕ ───────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "broadcast_done", BroadcastFSM.collecting)
+@router.callback_query(BroadcastFSM.collecting, F.data == "broadcast_done")
 async def cb_broadcast_done(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа.", show_alert=True)
@@ -112,7 +122,7 @@ async def cb_broadcast_done(callback: types.CallbackQuery, state: FSMContext):
 
 # ─── ОТПРАВКА ────────────────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "broadcast_send", BroadcastFSM.confirm)
+@router.callback_query(BroadcastFSM.confirm, F.data == "broadcast_send")
 async def cb_broadcast_send(callback: types.CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Нет доступа.", show_alert=True)
@@ -153,11 +163,21 @@ async def cb_broadcast_send(callback: types.CallbackQuery, state: FSMContext):
 
 async def _send_broadcast_to_user(bot, user_id: int, messages: list[dict]):
     for item in messages:
-        if item["type"] == "text":
+        t = item["type"]
+        if t == "text":
             await bot.send_message(user_id, item["text"])
-        elif item["type"] == "photo":
+        elif t == "photo":
             await bot.send_photo(user_id, item["file_id"], caption=item.get("caption") or None)
-        elif item["type"] == "video":
+        elif t == "video":
             await bot.send_video(user_id, item["file_id"], caption=item.get("caption") or None)
-        elif item["type"] == "document":
+        elif t == "animation":
+            await bot.send_animation(user_id, item["file_id"], caption=item.get("caption") or None)
+        elif t == "document":
             await bot.send_document(user_id, item["file_id"], caption=item.get("caption") or None)
+        elif t == "audio":
+            await bot.send_audio(user_id, item["file_id"], caption=item.get("caption") or None)
+        elif t == "voice":
+            await bot.send_voice(user_id, item["file_id"])
+        elif t == "sticker":
+            await bot.send_sticker(user_id, item["file_id"])
+        
