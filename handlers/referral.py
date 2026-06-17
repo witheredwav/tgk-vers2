@@ -29,7 +29,7 @@ async def cb_referral_info(callback: types.CallbackQuery):
 
     lines = [
         "🤝 *Реферальная программа*\n",
-        f"Твоя ссылка:\n`{ref_link}`\n",
+        f"Твоя ссылка (нажми, чтобы скопировать или переслать):\n{ref_link}\n",
         f"Подтверждённых друзей: *{count}*\n",
         "*Уровни скидок:*"
     ]
@@ -59,8 +59,16 @@ async def cb_referral_info(callback: types.CallbackQuery):
         "этот уровень — остаток выше порога сохранится и продолжит копиться к следующей скидке._"
     )
 
+    kb_referral = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="📤 Поделиться ссылкой",
+            switch_inline_query=f"Присоединяйся! {ref_link}"
+        )],
+        [types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_page2")],
+    ])
+
     await callback.message.edit_text(
-        "\n".join(lines), parse_mode="Markdown", reply_markup=kb.kb_back_to_page2()
+        "\n".join(lines), parse_mode="Markdown", reply_markup=kb_referral
     )
 
 
