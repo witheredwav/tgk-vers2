@@ -22,6 +22,7 @@ async def cb_referral_info(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     bot_info = await callback.bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{user_id}"
+    ref_link_escaped = ref_link.replace("_", "\\_")  # экранируем подчёркивания для Markdown-режима
     count = db.get_referral_count(user_id)
 
     tiers_sorted = sorted(REFERRAL_TIERS, key=lambda x: x[0])
@@ -29,7 +30,7 @@ async def cb_referral_info(callback: types.CallbackQuery):
 
     lines = [
         "🤝 *Реферальная программа*\n",
-        f"Твоя ссылка (нажми, чтобы скопировать или переслать):\n{ref_link}\n",
+        f"Твоя ссылка (нажми, чтобы скопировать или переслать):\n{ref_link_escaped}\n",
         f"Подтверждённых друзей: *{count}*\n",
         "*Уровни скидок:*"
     ]
