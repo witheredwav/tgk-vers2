@@ -47,6 +47,10 @@ def load_db() -> dict:
             if key == "joined":
                 continue
             user.setdefault(key, val)
+    # миграция кодов скидок, выданных до введения tier_threshold
+    for code, entry in data["discount_codes"].items():
+        if "tier_threshold" not in entry:
+            entry["tier_threshold"] = _threshold_for_tier(entry.get("tier_percent", 0))
     return data
 
 def save_db(db: dict):
@@ -195,6 +199,13 @@ def _tier_for_count(count: int) -> int | None:
             percent = pct
     return percent
 
+def _threshold_for_tier(tier_percent: int) -> int:
+    """Обратная операция: по % скидки находит порог (кол-во рефералов), на котором он выдаётся."""
+    for threshold, pct in REFERRAL_TIERS:
+        if pct == tier_percent:
+            return threshold
+    return 0
+
 def _generate_discount_code() -> str:
     """9 символов: случайные буквы (латиница, верхний регистр) и цифры."""
     db = load_db()
@@ -268,9 +279,11 @@ def _apply_referral_change(db: dict, ref_uid: str) -> dict | None:
         # удаляем старый код этого пользователя (если был) и выдаём новый под новый уровень
         _delete_user_discount_codes(db, ref_uid)
         code = _generate_discount_code()
+        new_threshold = _threshold_for_tier(new_tier)
         db["discount_codes"][code] = {
             "user_id": ref_uid,
             "tier_percent": new_tier,
+            "tier_threshold": new_threshold,  # сколько именно рефералов вычесть при использовании кода
             "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         referrer["current_tier_percent"] = new_tier
@@ -279,6 +292,7 @@ def _apply_referral_change(db: dict, ref_uid: str) -> dict | None:
         "referrer_id": int(ref_uid),
         "referral_count": new_count,
         "tier_percent": new_tier or 0,
+        "tier_threshold": _threshold_for_tier(new_tier) if new_tier else 0,
         "tier_changed": tier_changed,
         "code": code,  # None если уровень не сменился — код уже есть у пользователя, новый не нужен
     }
@@ -326,24 +340,29 @@ def adjust_referral_count(user_id: int, delta: int) -> dict | None:
     return result
 
 
-def reset_referral_progress(user_id: int):
+def reset_referral_progress(user_id: int, deduct: int):
     """
-    Полный сброс реферального прогресса пользователя — вызывается после того,
-    как админ удалил его использованный код скидки (т.е. скидка была применена
-    к заказу). Пользователь начинает копить рефералов заново с нуля.
+    Частичный сброс реферального прогресса после использования кода скидки:
+    вычитает ровно `deduct` (порог того уровня, на котором был выдан использованный код),
+    а не весь счёт целиком. Если у пользователя накопилось больше, чем требовал порог
+    (например, набрал 12 при пороге 10) — остаток (2) сохраняется и продолжает копиться
+    к следующему уровню.
 
-    Обнуляет confirmed_referrals, manual_adjustment и current_tier_percent.
-    Сама запись о том, кто кого пригласил (referrals у других пользователей,
-    указывающих на этого как на referrer) не трогается — это история, а не счётчик.
+    Реализовано через manual_adjustment (может уйти в минус относительно confirmed_referrals,
+    это нормально — _effective_referral_count всё равно не даст итоговому числу стать
+    отрицательным благодаря max(0, ...)).
+
+    current_tier_percent пересчитывается под новое итоговое количество, чтобы дальнейшие
+    сравнения "старый/новый уровень" в _apply_referral_change были корректны.
     """
     db = load_db()
     uid = str(user_id)
     user = db["users"].get(uid)
     if not user:
         return
-    user["confirmed_referrals"] = []
-    user["manual_adjustment"] = 0
-    user["current_tier_percent"] = 0
+    user["manual_adjustment"] = user.get("manual_adjustment", 0) - deduct
+    new_count = _effective_referral_count(user)
+    user["current_tier_percent"] = _tier_for_count(new_count) or 0
     save_db(db)
 
 # ─── КОДЫ СКИДОК ────────────────────────────────────────────────────────────────
@@ -359,8 +378,8 @@ def list_discount_codes() -> dict:
 def delete_discount_code(code: str, reset_owner_progress: bool = True) -> dict | None:
     """
     Удаляет код скидки (вызывается, когда пользователь воспользовался скидкой).
-    По умолчанию также обнуляет реферальный прогресс владельца кода — это соответствует
-    логике "скидка применена к заказу → копим рефералов заново с нуля".
+    По умолчанию также вычитает у владельца ровно столько рефералов, сколько требовал
+    порог этого уровня (а не весь счёт) — см. reset_referral_progress.
 
     Возвращает данные удалённого кода (включая user_id) для уведомления, либо None если код не найден.
     """
@@ -374,7 +393,8 @@ def delete_discount_code(code: str, reset_owner_progress: bool = True) -> dict |
     save_db(db)
 
     if reset_owner_progress:
-        reset_referral_progress(int(data["user_id"]))
+        deduct = data.get("tier_threshold", 0)
+        reset_referral_progress(int(data["user_id"]), deduct)
 
     return data
 
