@@ -211,11 +211,11 @@ def confirm_referral(referred_user_id: int) -> dict | None:
     (а не просто перешёл по ссылке). Это и есть защита от накрутки ботами/фейками:
     подписаться на реальный канал — заметно дороже, чем просто открыть ссылку.
 
-    Засчитывает реферала рефереру, пересчитывает уровень скидки, при необходимости
-    генерирует новый код взамен старого.
+    Засчитывает реферала рефереру и пересчитывает его прогресс через _apply_referral_change.
 
-    Возвращает dict с информацией о смене уровня для уведомления пользователя,
-    либо None если уровень не изменился или у пользователя нет реферера.
+    Возвращает dict с информацией для уведомления пользователя (всегда, если есть реферер
+    и счёт реально изменился), либо None если у пользователя нет реферера или реферал
+    уже был засчитан ранее (анти-дубль).
     """
     db = load_db()
     uid = str(referred_user_id)
@@ -234,19 +234,39 @@ def confirm_referral(referred_user_id: int) -> dict | None:
         return None
     confirmed.append(uid)
 
-    old_count = _effective_referral_count(referrer) - 1  # до этого подтверждения
-    new_count = _effective_referral_count(referrer)
+    result = _apply_referral_change(db, ref_uid)
+    save_db(db)
+    return result
 
-    old_tier = _tier_for_count(old_count)
+
+def _apply_referral_change(db: dict, ref_uid: str) -> dict | None:
+    """
+    Общая логика пересчёта после ЛЮБОГО изменения числа рефералов пользователя
+    (будь то реальное подтверждение подписки другом ИЛИ ручная корректировка админом).
+
+    Всегда возвращает dict с актуальным количеством для уведомления "у тебя +1 реферал",
+    даже если уровень скидки не изменился. Если уровень изменился — старый код удаляется,
+    выдаётся новый, и в результате это помечено отдельным флагом.
+
+    ВАЖНО: эта функция только меняет данные в переданном db (без save_db) —
+    сохранение делает вызывающий код, чтобы можно было обернуть в одну атомарную запись.
+    """
+    referrer = db["users"].get(ref_uid)
+    if not referrer:
+        return None
+
+    # "до" берём из уже сохранённого current_tier_percent, а не пересчитываем срез назад,
+    # это надёжнее при ручных корректировках, которые могут прыгать не на 1
+    old_tier_percent = referrer.get("current_tier_percent", 0) or None
+    new_count = _effective_referral_count(referrer)
     new_tier = _tier_for_count(new_count)
 
-    result = None
+    tier_changed = new_tier != old_tier_percent
 
-    if new_tier != old_tier and new_tier is not None:
-        # удаляем старый код этого пользователя, если был
+    code = None
+    if tier_changed and new_tier is not None:
+        # удаляем старый код этого пользователя (если был) и выдаём новый под новый уровень
         _delete_user_discount_codes(db, ref_uid)
-
-        # генерируем новый код под новый уровень
         code = _generate_discount_code()
         db["discount_codes"][code] = {
             "user_id": ref_uid,
@@ -255,21 +275,21 @@ def confirm_referral(referred_user_id: int) -> dict | None:
         }
         referrer["current_tier_percent"] = new_tier
 
-        result = {
-            "referrer_id": int(ref_uid),
-            "new_tier_percent": new_tier,
-            "code": code,
-            "referral_count": new_count,
-        }
+    return {
+        "referrer_id": int(ref_uid),
+        "referral_count": new_count,
+        "tier_percent": new_tier or 0,
+        "tier_changed": tier_changed,
+        "code": code,  # None если уровень не сменился — код уже есть у пользователя, новый не нужен
+    }
 
-    save_db(db)
-    return result
 
 def _delete_user_discount_codes(db: dict, user_id: str):
     """Удаляет все активные коды скидки данного пользователя (используется перед выдачей нового)."""
     to_delete = [c for c, data in db["discount_codes"].items() if data["user_id"] == user_id]
     for c in to_delete:
         del db["discount_codes"][c]
+
 
 def get_referral_leaderboard(limit: int = 10) -> list[tuple[str, int, int]]:
     """Возвращает [(user_id, effective_count, tier_percent)], отсортировано по убыванию."""
@@ -283,21 +303,48 @@ def get_referral_leaderboard(limit: int = 10) -> list[tuple[str, int, int]]:
     rows.sort(key=lambda x: x[1], reverse=True)
     return rows[:limit]
 
-def adjust_referral_count(user_id: int, delta: int) -> int:
+
+def adjust_referral_count(user_id: int, delta: int) -> dict | None:
     """
     Ручная корректировка количества рефералов админом (+1 / -1 / любое значение).
     Не трогает confirmed_referrals напрямую (это лог реальных подтверждений),
     а меняет manual_adjustment — итоговое число это confirmed + manual_adjustment.
-    Возвращает новое эффективное количество.
+
+    Теперь проходит через ту же логику что и обычное подтверждение реферала:
+    пересчитывает уровень, выдаёт/заменяет код скидки если уровень изменился,
+    и возвращает dict для уведомления пользователя — точно так же, как при обычном реферале.
     """
     db = load_db()
     uid = str(user_id)
     user = db["users"].get(uid)
     if not user:
-        return 0
+        return None
     user["manual_adjustment"] = user.get("manual_adjustment", 0) + delta
+
+    result = _apply_referral_change(db, uid)
     save_db(db)
-    return _effective_referral_count(user)
+    return result
+
+
+def reset_referral_progress(user_id: int):
+    """
+    Полный сброс реферального прогресса пользователя — вызывается после того,
+    как админ удалил его использованный код скидки (т.е. скидка была применена
+    к заказу). Пользователь начинает копить рефералов заново с нуля.
+
+    Обнуляет confirmed_referrals, manual_adjustment и current_tier_percent.
+    Сама запись о том, кто кого пригласил (referrals у других пользователей,
+    указывающих на этого как на referrer) не трогается — это история, а не счётчик.
+    """
+    db = load_db()
+    uid = str(user_id)
+    user = db["users"].get(uid)
+    if not user:
+        return
+    user["confirmed_referrals"] = []
+    user["manual_adjustment"] = 0
+    user["current_tier_percent"] = 0
+    save_db(db)
 
 # ─── КОДЫ СКИДОК ────────────────────────────────────────────────────────────────
 
@@ -309,14 +356,27 @@ def list_discount_codes() -> dict:
     db = load_db()
     return db["discount_codes"]
 
-def delete_discount_code(code: str) -> bool:
+def delete_discount_code(code: str, reset_owner_progress: bool = True) -> dict | None:
+    """
+    Удаляет код скидки (вызывается, когда пользователь воспользовался скидкой).
+    По умолчанию также обнуляет реферальный прогресс владельца кода — это соответствует
+    логике "скидка применена к заказу → копим рефералов заново с нуля".
+
+    Возвращает данные удалённого кода (включая user_id) для уведомления, либо None если код не найден.
+    """
     db = load_db()
     code = code.upper()
-    if code in db["discount_codes"]:
-        del db["discount_codes"][code]
-        save_db(db)
-        return True
-    return False
+    data = db["discount_codes"].get(code)
+    if not data:
+        return None
+
+    del db["discount_codes"][code]
+    save_db(db)
+
+    if reset_owner_progress:
+        reset_referral_progress(int(data["user_id"]))
+
+    return data
 
 # ─── ЛОГ РАССЫЛОК ──────────────────────────────────────────────────────────────
 
