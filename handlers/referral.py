@@ -55,7 +55,8 @@ async def cb_referral_info(callback: types.CallbackQuery):
         "просто перехода по ссылке недостаточно._\n\n"
         "_Скидка действует на весь заказ целиком: можно заказать одно сведение "
         "или сразу несколько треков — скидка применится один раз ко всей сумме. "
-        "После использования код сгорает, и счёт друзей начинается заново._"
+        "После использования кода списывается ровно столько друзей, сколько требовал "
+        "этот уровень — остаток выше порога сохранится и продолжит копиться к следующей скидке._"
     )
 
     await callback.message.edit_text(
@@ -245,7 +246,9 @@ async def cb_view_discount(callback: types.CallbackQuery):
         f"🎁 *Код скидки:* `{code}`\n"
         f"👤 *Пользователь:* `{data['user_id']}`\n"
         f"💸 *Скидка:* {data['tier_percent']}%\n"
-        f"📅 *Создан:* {data['created']}"
+        f"📅 *Создан:* {data['created']}\n\n"
+        f"_При удалении у пользователя будет вычтено {data.get('tier_threshold', 0)} рефералов "
+        f"(порог этого уровня) — остаток выше порога сохранится и продолжит копиться._"
     )
     kb_back = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🗑 Удалить (использован)", callback_data=f"deldisc_{code}")],
@@ -261,16 +264,20 @@ async def cb_delete_discount(callback: types.CallbackQuery):
         return
 
     code = callback.data.replace("deldisc_", "")
+    deducted = db.get_discount_code(code)
+    deduct_amount = deducted.get("tier_threshold", 0) if deducted else 0
     deleted = db.delete_discount_code(code)
     if deleted:
-        await callback.answer(f"✅ Код {code} удалён. Прогресс пользователя сброшен.", show_alert=True)
+        await callback.answer(f"✅ Код {code} удалён. Списано {deduct_amount} рефералов.", show_alert=True)
         try:
+            new_count = db.get_referral_count(int(deleted["user_id"]))
+            extra = ""
+            if new_count > 0:
+                extra = f" У тебя остаётся *{new_count}* друзей — они продолжают копиться к следующему уровню!"
             await callback.bot.send_message(
                 int(deleted["user_id"]),
                 "✅ *Скидка применена к заказу!*\n\n"
-                "Спасибо, что воспользовался реферальной программой. "
-                "Счёт приглашённых друзей начинается заново — "
-                "приглашай новых друзей и получай скидку снова! 🤝",
+                f"Спасибо, что воспользовался реферальной программой.{extra}",
                 parse_mode="Markdown"
             )
         except Exception:
