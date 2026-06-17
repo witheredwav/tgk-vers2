@@ -80,8 +80,6 @@ def get_stats_text() -> str:
     events = {
         "start": "🚀 /start",
         "check_sub": "✅ Проверка подписки",
-        "works": "🎧 Примеры работ",
-        "order": "💬 Заказать сведение",
         "enter_key": "🔑 Ввод ключа",
     }
 
